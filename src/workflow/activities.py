@@ -88,6 +88,24 @@ def _register_execution(instance_id: str, issue_context: dict) -> str | None:
     return None
 
 
+def _update_execution_status(execution_id: str, phase: str, progress: int, status: str = "running") -> None:
+    """Update the workflow execution status in workflow-builder DB via pub/sub event.
+
+    Uses the same event format as the workflow-orchestrator's publish_phase_changed.
+    Best-effort.
+    """
+    if not execution_id or not ENABLE_WORKFLOW_EVENTS:
+        return
+    _publish_event("workflow.phase.changed", {
+        "executionId": execution_id,
+        "workflowId": WORKFLOW_BUILDER_WORKFLOW_ID,
+        "phase": phase,
+        "progress": progress,
+        "status": status,
+        "source": "dapr-swe",
+    })
+
+
 def _post_agent_event(execution_id: str, event_type: str, data: dict) -> None:
     """Post an agent event to workflow-builder for execution tracking.
 
@@ -186,6 +204,7 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
     # Register execution in workflow-builder DB (Phase 2 integration)
     instance_id = f"resolve-{owner}-{repo}-{input.get('issue_number')}"
     wb_execution_id = _register_execution(instance_id, input)
+    _update_execution_status(wb_execution_id, "initializing", 10)
 
     return {
         **input,
@@ -215,6 +234,7 @@ def create_plan(ctx: WorkflowActivityContext, input: dict) -> dict:
         "summary": plan.get("summary", ""),
         "steps": len(plan.get("steps", [])),
     })
+    _update_execution_status(input.get("wb_execution_id", ""), "planning", 25)
     _post_agent_event(input.get("wb_execution_id", ""), "plan_created", {
         "phase": "planning",
         "summary": plan.get("summary", ""),
@@ -261,6 +281,7 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
         "step_title": step.get("title", ""),
         "status": result.get("status", "unknown"),
     })
+    _update_execution_status(input.get("wb_execution_id", ""), "implementing", 40 + step_index * 10)
     _post_agent_event(input.get("wb_execution_id", ""), "step_completed", {
         "phase": "implementing",
         "stepIndex": step_index,
@@ -305,6 +326,7 @@ def review_changes(ctx: WorkflowActivityContext, input: dict) -> dict:
     review = run_reviewer(diff=diff, issue_context=input, plan=plan)
     logger.info("Review: approved=%s", review.get("approved"))
 
+    _update_execution_status(input.get("wb_execution_id", ""), "reviewing", 75)
     _publish_event("dapr-swe.review.completed", {
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "approved": review.get("approved", False),
