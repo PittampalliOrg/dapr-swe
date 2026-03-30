@@ -1,0 +1,23 @@
+[project]
+name = "dapr-swe"
+version = "0.1.0"
+description = "Distributed coding agent on Dapr Workflows + Agents with OpenShell sandboxes"
+requires-python = ">=3.12"
+dependencies = [
+    "dapr-agents>=0.10",
+    "dapr-ext-workflow>=1.14",
+    "dapr>=1.14",
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "httpx>=0.25",
+    "PyJWT[crypto]>=2.8",
+    "cryptography>=41",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.backends"
