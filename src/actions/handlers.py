@@ -24,14 +24,29 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve(input_data: dict, node_outputs: dict, key: str, node_label: str = "") -> Any:
-    """Resolve a value from input_data or a previous node's output."""
+    """Resolve a value from input_data or a previous node's output.
+
+    Searches: input_data → node_outputs[*].data → node_outputs[*].data.data (nested).
+    The orchestrator stores node results as: {data: {success, data: {actual_fields}}}.
+    """
     if key in input_data:
         return input_data[key]
-    # Look in node_outputs for the key in any node's data
+    # Search all previous node outputs
     for nid, out in node_outputs.items():
-        data = out.get("data", out) if isinstance(out, dict) else {}
-        if key in data:
-            return data[key]
+        if not isinstance(out, dict):
+            continue
+        # Direct in output
+        if key in out:
+            return out[key]
+        # In output.data
+        data = out.get("data", {})
+        if isinstance(data, dict):
+            if key in data:
+                return data[key]
+            # In output.data.data (nested function-router response)
+            inner = data.get("data", {})
+            if isinstance(inner, dict) and key in inner:
+                return inner[key]
     return None
 
 

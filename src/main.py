@@ -100,10 +100,22 @@ async def readiness_check() -> dict:
 
 @app.post("/execute")
 async def execute_action(request: Request) -> dict:
-    """Handle action requests from workflow-builder function-router."""
+    """Handle action requests from workflow-builder function-router.
+
+    Accepts multiple payload formats:
+    - Direct: {"function_slug": "dapr-swe/plan", "input": {...}, "node_outputs": {...}}
+    - Orchestrator: {"input": {"actionType": "dapr-swe/plan", ...}, "node_outputs": {...}}
+    - Function-router: full body with function_slug or input.actionType
+    """
     body = await request.json()
-    function_slug = body.get("function_slug", "")
-    input_data = body.get("input", {})
+
+    # Resolve function slug from multiple possible locations
+    function_slug = (
+        body.get("function_slug")
+        or body.get("function_id")
+        or (body.get("input", {}) or {}).get("actionType", "")
+    )
+    input_data = body.get("input", body)  # Fall back to full body as input
     node_outputs = body.get("node_outputs", {})
 
     handler = ACTION_HANDLERS.get(function_slug)
