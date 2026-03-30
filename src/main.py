@@ -3,10 +3,47 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from dapr.ext.workflow import WorkflowRuntime
 from fastapi import FastAPI, Request
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry initialization (must happen before FastAPI app creation)
+# ---------------------------------------------------------------------------
+
+def _init_otel() -> None:
+    """Initialize OpenTelemetry tracing if OTEL_EXPORTER_OTLP_ENDPOINT is set."""
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        resource = Resource.create({
+            "service.name": os.environ.get("OTEL_SERVICE_NAME", "dapr-swe"),
+            "service.namespace": "workflow-builder",
+        })
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+
+        # Auto-instrument FastAPI and httpx
+        FastAPIInstrumentor.instrument()
+        HTTPXClientInstrumentor.instrument()
+
+        logging.getLogger(__name__).info("OpenTelemetry tracing initialized → %s", endpoint)
+    except Exception:
+        logging.getLogger(__name__).debug("OpenTelemetry init failed (optional)", exc_info=True)
+
+_init_otel()
 
 from src.actions import ACTION_HANDLERS
 from src.webhook.github import router as github_router
@@ -125,9 +162,17 @@ async def execute_action(request: Request) -> dict:
     try:
         import asyncio
 
-        # Run handler in thread to avoid blocking uvicorn's event loop
-        # (handlers use sync httpx and may call asyncio.run internally)
-        result = await asyncio.to_thread(handler, input_data, node_outputs)
+        from src.tracing import trace_activity
+
+        # Run handler in thread with tracing span
+        def _run():
+            with trace_activity(f"dapr-swe.execute.{function_slug}", {
+                "dapr_swe.action": function_slug,
+                "dapr_swe.repo": (input_data.get("owner", "") + "/" + input_data.get("repo", "")).strip("/"),
+            }):
+                return handler(input_data, node_outputs)
+
+        result = await asyncio.to_thread(_run)
         return result
     except Exception as e:
         logger.exception("Action handler %s failed", function_slug)

@@ -15,6 +15,7 @@ import httpx
 from src.events import publish_event, register_execution, update_execution_status, post_agent_event, post_issue_comment
 from src.integrations.github_app import get_github_app_installation_token
 from src.sandbox.openshell import OpenShellBackend, create_openshell_sandbox
+from src.tracing import trace_activity
 
 logger = logging.getLogger(__name__)
 
