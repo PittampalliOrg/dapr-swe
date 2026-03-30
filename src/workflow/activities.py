@@ -3,136 +3,21 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 
 import httpx
 from dapr.ext.workflow import WorkflowActivityContext
 
-from src.config import (
-    DAPR_PUBSUB,
-    ENABLE_WORKFLOW_EVENTS,
-    GITHUB_WEBHOOK_SECRET,
-    WORKFLOW_BUILDER_BASE_URL,
-    WORKFLOW_BUILDER_INTERNAL_TOKEN,
-    WORKFLOW_BUILDER_WORKFLOW_ID,
-    WORKFLOW_EVENT_TOPIC,
+from src.events import (
+    post_agent_event,
+    post_issue_comment,
+    publish_event,
+    register_execution,
+    update_execution_status,
 )
 from src.integrations.github_app import get_github_app_installation_token
 from src.sandbox.openshell import OpenShellBackend, create_openshell_sandbox
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Event publishing (workflow-builder integration)
-# ---------------------------------------------------------------------------
-
-
-def _publish_event(event_type: str, data: dict) -> None:
-    """Publish a workflow event to the shared NATS JetStream topic.
-
-    Best-effort — failures are logged but never block the workflow.
-    """
-    if not ENABLE_WORKFLOW_EVENTS:
-        return
-    payload = {
-        "type": event_type,
-        "source": "dapr-swe",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "datacontenttype": "application/json",
-        "data": data,
-    }
-    try:
-        with httpx.Client(timeout=5) as client:
-            client.post(
-                f"http://localhost:3500/v1.0/publish/{DAPR_PUBSUB}/{WORKFLOW_EVENT_TOPIC}",
-                json=payload,
-            )
-    except Exception:
-        logger.debug("Failed to publish event %s (best-effort)", event_type)
-
-
-def _register_execution(instance_id: str, issue_context: dict) -> str | None:
-    """Register a workflow execution in workflow-builder's DB.
-
-    Returns the execution ID if successful, None otherwise.
-    Best-effort — failures don't block the workflow.
-    """
-    if not WORKFLOW_BUILDER_INTERNAL_TOKEN or not WORKFLOW_BUILDER_WORKFLOW_ID:
-        return None
-    try:
-        with httpx.Client(timeout=10) as client:
-            resp = client.post(
-                f"{WORKFLOW_BUILDER_BASE_URL}/api/internal/agent/workflows/execute",
-                headers={
-                    "X-Internal-Token": WORKFLOW_BUILDER_INTERNAL_TOKEN,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "workflowId": WORKFLOW_BUILDER_WORKFLOW_ID,
-                    "triggerData": {
-                        "source": "dapr-swe",
-                        "issue": f"{issue_context.get('owner')}/{issue_context.get('repo')}#{issue_context.get('issue_number')}",
-                        "title": issue_context.get("title", ""),
-                        "daprInstanceId": instance_id,
-                    },
-                },
-            )
-            if resp.status_code in (200, 201):
-                data = resp.json()
-                execution_id = data.get("executionId", "")
-                logger.info("Registered execution %s in workflow-builder", execution_id)
-                return execution_id
-    except Exception:
-        logger.debug("Failed to register execution in workflow-builder (best-effort)")
-    return None
-
-
-def _update_execution_status(execution_id: str, phase: str, progress: int, status: str = "running") -> None:
-    """Update the workflow execution status in workflow-builder DB via pub/sub event.
-
-    Uses the same event format as the workflow-orchestrator's publish_phase_changed.
-    Best-effort.
-    """
-    if not execution_id or not ENABLE_WORKFLOW_EVENTS:
-        return
-    _publish_event("workflow.phase.changed", {
-        "executionId": execution_id,
-        "workflowId": WORKFLOW_BUILDER_WORKFLOW_ID,
-        "phase": phase,
-        "progress": progress,
-        "status": status,
-        "source": "dapr-swe",
-    })
-
-
-def _post_agent_event(execution_id: str, event_type: str, data: dict) -> None:
-    """Post an agent event to workflow-builder for execution tracking.
-
-    Best-effort — failures don't block the workflow.
-    """
-    if not execution_id or not WORKFLOW_BUILDER_INTERNAL_TOKEN:
-        return
-    try:
-        with httpx.Client(timeout=5) as client:
-            client.post(
-                f"{WORKFLOW_BUILDER_BASE_URL}/api/internal/agent-events",
-                headers={
-                    "X-Internal-Token": WORKFLOW_BUILDER_INTERNAL_TOKEN,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "workflowExecutionId": execution_id,
-                    "events": [{
-                        "event_type": event_type,
-                        "phase": data.get("phase", ""),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        **{k: v for k, v in data.items() if k != "phase"},
-                    }],
-                },
-            )
-    except Exception:
-        logger.debug("Failed to post agent event %s (best-effort)", event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +80,7 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
     if agents_result.exit_code == 0 and agents_result.output.strip():
         agents_md = agents_result.output.strip()
 
-    _publish_event("dapr-swe.workflow.started", {
+    publish_event("dapr-swe.workflow.started", {
         "issue": f"{owner}/{repo}#{input.get('issue_number')}",
         "title": input.get("title", ""),
         "sandbox_id": sandbox_id,
@@ -203,8 +88,8 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     # Register execution in workflow-builder DB (Phase 2 integration)
     instance_id = f"resolve-{owner}-{repo}-{input.get('issue_number')}"
-    wb_execution_id = _register_execution(instance_id, input)
-    _update_execution_status(wb_execution_id, "initializing", 10)
+    wb_execution_id = register_execution(instance_id, input)
+    update_execution_status(wb_execution_id, "initializing", 10)
 
     return {
         **input,
@@ -229,13 +114,13 @@ def create_plan(ctx: WorkflowActivityContext, input: dict) -> dict:
     plan = run_planner(sandbox, input)
     logger.info("Plan created: %s", plan.get("summary", ""))
 
-    _publish_event("dapr-swe.plan.created", {
+    publish_event("dapr-swe.plan.created", {
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "summary": plan.get("summary", ""),
         "steps": len(plan.get("steps", [])),
     })
-    _update_execution_status(input.get("wb_execution_id", ""), "planning", 25)
-    _post_agent_event(input.get("wb_execution_id", ""), "plan_created", {
+    update_execution_status(input.get("wb_execution_id", ""), "planning", 25)
+    post_agent_event(input.get("wb_execution_id", ""), "plan_created", {
         "phase": "planning",
         "summary": plan.get("summary", ""),
         "stepCount": len(plan.get("steps", [])),
@@ -260,7 +145,7 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     logger.info("Implementing step %d: %s", step_index, step.get("title", ""))
 
-    _publish_event("dapr-swe.step.started", {
+    publish_event("dapr-swe.step.started", {
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "step_index": step_index,
         "step_title": step.get("title", ""),
@@ -275,14 +160,14 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     logger.info("Step %d result: %s", step_index, result.get("status", "unknown"))
 
-    _publish_event("dapr-swe.step.completed", {
+    publish_event("dapr-swe.step.completed", {
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "step_index": step_index,
         "step_title": step.get("title", ""),
         "status": result.get("status", "unknown"),
     })
-    _update_execution_status(input.get("wb_execution_id", ""), "implementing", 40 + step_index * 10)
-    _post_agent_event(input.get("wb_execution_id", ""), "step_completed", {
+    update_execution_status(input.get("wb_execution_id", ""), "implementing", 40 + step_index * 10)
+    post_agent_event(input.get("wb_execution_id", ""), "step_completed", {
         "phase": "implementing",
         "stepIndex": step_index,
         "stepTitle": step.get("title", ""),
@@ -326,8 +211,8 @@ def review_changes(ctx: WorkflowActivityContext, input: dict) -> dict:
     review = run_reviewer(diff=diff, issue_context=input, plan=plan)
     logger.info("Review: approved=%s", review.get("approved"))
 
-    _update_execution_status(input.get("wb_execution_id", ""), "reviewing", 75)
-    _publish_event("dapr-swe.review.completed", {
+    update_execution_status(input.get("wb_execution_id", ""), "reviewing", 75)
+    publish_event("dapr-swe.review.completed", {
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "approved": review.get("approved", False),
     })
@@ -403,7 +288,7 @@ def commit_and_open_pr(ctx: WorkflowActivityContext, input: dict) -> dict:
     if resp.status_code == 201:
         pr_url = resp.json().get("html_url", "")
         logger.info("PR created: %s", pr_url)
-        _publish_event("dapr-swe.pr.created", {
+        publish_event("dapr-swe.pr.created", {
             "issue": f"{owner}/{repo}#{issue_number}",
             "pr_url": pr_url,
         })
@@ -446,21 +331,9 @@ def notify_completion(ctx: WorkflowActivityContext, input: dict) -> dict:
     else:
         body = "I attempted to resolve this issue but was unable to open a PR."
 
-    with httpx.Client(timeout=30) as client:
-        resp = client.post(
-            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            json={"body": body},
-        )
+    post_issue_comment(owner, repo, issue_number, body, token)
 
-    if resp.status_code not in (200, 201):
-        logger.error("Failed to post issue comment: %s %s", resp.status_code, resp.text)
-
-    _publish_event("dapr-swe.workflow.completed", {
+    publish_event("dapr-swe.workflow.completed", {
         "issue": f"{owner}/{repo}#{issue_number}",
         "status": status or "completed",
         "pr_url": pr_url,

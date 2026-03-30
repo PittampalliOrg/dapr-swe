@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from src.events import publish_event, register_execution, update_execution_status, post_agent_event, post_issue_comment
 from src.integrations.github_app import get_github_app_installation_token
 from src.sandbox.openshell import OpenShellBackend, create_openshell_sandbox
 
@@ -153,6 +154,13 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     if agents_result.exit_code == 0 and agents_result.output.strip():
         agents_md = agents_result.output.strip()
 
+    # Publish workflow events and register execution
+    issue_ref = f"{owner}/{repo}#{input_data.get('issue_number', '')}"
+    publish_event("dapr-swe.workflow.started", {"issue": issue_ref, "title": input_data.get("title", ""), "sandbox_id": sandbox_id})
+    instance_id = f"resolve-{owner}-{repo}-{input_data.get('issue_number', '')}"
+    wb_execution_id = register_execution(instance_id, input_data)
+    update_execution_status(wb_execution_id, "initializing", 10)
+
     return {
         "success": True,
         "data": {
@@ -160,6 +168,7 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
             "working_dir": working_dir,
             "agents_md": agents_md,
             "github_token": token,
+            "wb_execution_id": wb_execution_id or "",
         },
         "error": None,
     }
@@ -196,6 +205,13 @@ def handle_plan(input_data: dict, node_outputs: dict) -> dict:
     except Exception as exc:
         logger.exception("PlannerAgent failed")
         return {"success": False, "data": {}, "error": f"PlannerAgent failed: {exc}"}
+
+    # Publish plan-created events
+    wb_exec_id = _resolve(input_data, node_outputs, "wb_execution_id") or ""
+    issue_ref = f"{_resolve(input_data, node_outputs, 'owner')}/{_resolve(input_data, node_outputs, 'repo')}#{_resolve(input_data, node_outputs, 'issue_number')}"
+    publish_event("dapr-swe.plan.created", {"issue": issue_ref, "summary": plan.get("summary", ""), "steps": len(plan.get("steps", []))})
+    update_execution_status(wb_exec_id, "planning", 25)
+    post_agent_event(wb_exec_id, "plan_created", {"phase": "planning", "summary": plan.get("summary", ""), "stepCount": len(plan.get("steps", []))})
 
     return {
         "success": True,
@@ -236,6 +252,10 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
 
     plan = _resolve(input_data, node_outputs, "plan") or {}
 
+    # Resolve event tracking context
+    wb_exec_id = _resolve(input_data, node_outputs, "wb_execution_id") or ""
+    issue_ref = f"{_resolve(input_data, node_outputs, 'owner')}/{_resolve(input_data, node_outputs, 'repo')}#{_resolve(input_data, node_outputs, 'issue_number')}"
+
     # Get step(s) to implement
     step = _resolve(input_data, node_outputs, "step")
     steps = plan.get("steps", [])
@@ -245,9 +265,13 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
         results = []
         for i, s in enumerate(steps):
             logger.info("Implementing step %d/%d: %s", i + 1, len(steps), s.get("title", ""))
+            publish_event("dapr-swe.step.started", {"issue": issue_ref, "step_index": i, "step_title": s.get("title", "")})
             try:
                 r = run_developer(sandbox=sandbox, step=s, issue_context=issue_context, plan=plan)
                 results.append(r)
+                publish_event("dapr-swe.step.completed", {"issue": issue_ref, "step_index": i, "step_title": s.get("title", ""), "status": r.get("status", "")})
+                update_execution_status(wb_exec_id, "implementing", 40 + i * 10)
+                post_agent_event(wb_exec_id, "step_completed", {"phase": "implementing", "stepIndex": i, "stepTitle": s.get("title", "")})
             except Exception as exc:
                 logger.warning("Step %d failed: %s", i + 1, exc)
                 results.append({"status": "error", "error": str(exc)})
@@ -264,6 +288,7 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
             "files": [],
         }
 
+    publish_event("dapr-swe.step.started", {"issue": issue_ref, "step_index": 0, "step_title": step.get("title", "")})
     try:
         result = run_developer(
             sandbox=sandbox,
@@ -274,6 +299,10 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
     except Exception as exc:
         logger.exception("DeveloperAgent failed")
         return {"success": False, "data": {}, "error": f"DeveloperAgent failed: {exc}"}
+
+    publish_event("dapr-swe.step.completed", {"issue": issue_ref, "step_index": 0, "step_title": step.get("title", ""), "status": result.get("status", "")})
+    update_execution_status(wb_exec_id, "implementing", 50)
+    post_agent_event(wb_exec_id, "step_completed", {"phase": "implementing", "stepIndex": 0, "stepTitle": step.get("title", "")})
 
     return {
         "success": True,
@@ -340,6 +369,12 @@ def handle_review(input_data: dict, node_outputs: dict) -> dict:
     except Exception as exc:
         logger.exception("ReviewerAgent failed")
         return {"success": False, "data": {}, "error": f"ReviewerAgent failed: {exc}"}
+
+    # Publish review events
+    wb_exec_id = _resolve(input_data, node_outputs, "wb_execution_id") or ""
+    issue_ref = f"{_resolve(input_data, node_outputs, 'owner')}/{_resolve(input_data, node_outputs, 'repo')}#{_resolve(input_data, node_outputs, 'issue_number')}"
+    update_execution_status(wb_exec_id, "reviewing", 75)
+    publish_event("dapr-swe.review.completed", {"issue": issue_ref, "approved": review.get("approved", False)})
 
     return {
         "success": True,
@@ -448,6 +483,10 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
 
     if resp.status_code == 201:
         pr_url = resp.json().get("html_url", "")
+        publish_event("dapr-swe.pr.created", {"issue": f"{owner}/{repo}#{issue_number}", "pr_url": pr_url})
+        # Post issue comment (notification)
+        post_issue_comment(owner, repo, issue_number, f"I've opened a draft PR: {pr_url}", token)
+        publish_event("dapr-swe.workflow.completed", {"issue": f"{owner}/{repo}#{issue_number}", "status": "success", "pr_url": pr_url})
         return {
             "success": True,
             "data": {"pr_url": pr_url, "branch": branch_name, "status": "success"},
