@@ -13,15 +13,18 @@ from fastapi import FastAPI, Request
 # OpenTelemetry initialization (must happen before FastAPI app creation)
 # ---------------------------------------------------------------------------
 
+_otel_ready = False
+
 def _init_otel() -> None:
     """Initialize OpenTelemetry tracing if OTEL_EXPORTER_OTLP_ENDPOINT is set."""
+    global _otel_ready
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
+        logging.getLogger(__name__).info("OTEL_EXPORTER_OTLP_ENDPOINT not set, skipping tracing")
         return
     try:
         from opentelemetry import trace
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
@@ -32,16 +35,18 @@ def _init_otel() -> None:
             "service.namespace": "workflow-builder",
         })
         provider = TracerProvider(resource=resource)
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        provider.add_span_processor(BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces")
+        ))
         trace.set_tracer_provider(provider)
 
-        # Auto-instrument FastAPI and httpx
-        FastAPIInstrumentor.instrument()
+        # Auto-instrument httpx (FastAPI will be instrumented after app creation)
         HTTPXClientInstrumentor.instrument()
 
+        _otel_ready = True
         logging.getLogger(__name__).info("OpenTelemetry tracing initialized → %s", endpoint)
-    except Exception:
-        logging.getLogger(__name__).debug("OpenTelemetry init failed (optional)", exc_info=True)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("OpenTelemetry init failed: %s", exc)
 
 _init_otel()
 
@@ -120,6 +125,15 @@ app = FastAPI(
 
 # Register routes
 app.include_router(github_router)
+
+# Instrument FastAPI app with OTEL (must happen after app creation)
+if _otel_ready:
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        FastAPIInstrumentor.instrument_app(app)
+        logger.info("FastAPI OTEL instrumentation applied")
+    except Exception as exc:
+        logger.warning("FastAPI OTEL instrumentation failed: %s", exc)
 
 
 @app.get("/healthz")
