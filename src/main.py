@@ -41,7 +41,7 @@ def _init_otel() -> None:
         trace.set_tracer_provider(provider)
 
         # Auto-instrument httpx (FastAPI will be instrumented after app creation)
-        HTTPXClientInstrumentor.instrument()
+        HTTPXClientInstrumentor().instrument()
 
         _otel_ready = True
         logging.getLogger(__name__).info("OpenTelemetry tracing initialized → %s", endpoint)
