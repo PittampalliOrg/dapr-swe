@@ -86,10 +86,9 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
         "sandbox_id": sandbox_id,
     })
 
-    # Register execution in workflow-builder DB (Phase 2 integration)
-    instance_id = f"resolve-{owner}-{repo}-{input.get('issue_number')}"
-    wb_execution_id = register_execution(instance_id, input)
-    update_execution_status(wb_execution_id, "initializing", 10)
+    # Note: DB registration only happens in Path 2 (handlers.py).
+    # Path 1 (webhook) uses events only — no duplicate orchestrator workflow.
+    wb_execution_id = ""
 
     return {
         **input,

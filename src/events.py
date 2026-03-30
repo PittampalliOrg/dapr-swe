@@ -46,11 +46,18 @@ def publish_event(event_type: str, data: dict) -> None:
 def register_execution(instance_id: str, issue_context: dict) -> str | None:
     """Register a workflow execution in workflow-builder's DB.
 
+    Calls the BFF execute API which creates a DB record. The orchestrator
+    may start a duplicate workflow that fails — this is expected and harmless.
+    The DB record persists regardless and gets updated by our status events.
+
     Returns the execution ID if successful, None otherwise.
     Best-effort — failures don't block the workflow.
     """
     if not WORKFLOW_BUILDER_INTERNAL_TOKEN or not WORKFLOW_BUILDER_WORKFLOW_ID:
         return None
+
+    issue_ref = f"{issue_context.get('owner')}/{issue_context.get('repo')}#{issue_context.get('issue_number')}"
+
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.post(
@@ -63,8 +70,11 @@ def register_execution(instance_id: str, issue_context: dict) -> str | None:
                     "workflowId": WORKFLOW_BUILDER_WORKFLOW_ID,
                     "triggerData": {
                         "source": "dapr-swe",
-                        "issue": f"{issue_context.get('owner')}/{issue_context.get('repo')}#{issue_context.get('issue_number')}",
+                        "issue": issue_ref,
                         "title": issue_context.get("title", ""),
+                        "owner": issue_context.get("owner", ""),
+                        "repo": issue_context.get("repo", ""),
+                        "issue_number": issue_context.get("issue_number", 0),
                         "daprInstanceId": instance_id,
                     },
                 },
