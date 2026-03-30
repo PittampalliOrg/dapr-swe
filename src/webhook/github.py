@@ -203,9 +203,11 @@ async def _start_workflow(issue_context: IssueContext) -> dict[str, Any]:
     )
 
     try:
+        from src.workflow.resolve_issue import resolve_issue_workflow
+
         wf_client = DaprWorkflowClient()
         wf_client.schedule_new_workflow(
-            workflow="resolve_issue_workflow",
+            workflow=resolve_issue_workflow,
             input=issue_context.model_dump(),
             instance_id=instance_id,
         )

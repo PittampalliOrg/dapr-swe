@@ -31,10 +31,12 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
     owner = input["owner"]
     repo = input["repo"]
 
-    # Get GitHub token
-    token = asyncio.get_event_loop().run_until_complete(
-        get_github_app_installation_token()
-    )
+    # Get GitHub token (create new event loop since activities run in Dapr worker threads)
+    loop = asyncio.new_event_loop()
+    try:
+        token = loop.run_until_complete(get_github_app_installation_token())
+    finally:
+        loop.close()
     if not token:
         raise RuntimeError("Failed to obtain GitHub App installation token")
 
