@@ -12,6 +12,9 @@ from src.config import (
     DAPR_PUBSUB,
     ENABLE_WORKFLOW_EVENTS,
     GITHUB_WEBHOOK_SECRET,
+    WORKFLOW_BUILDER_BASE_URL,
+    WORKFLOW_BUILDER_INTERNAL_TOKEN,
+    WORKFLOW_BUILDER_WORKFLOW_ID,
     WORKFLOW_EVENT_TOPIC,
 )
 from src.integrations.github_app import get_github_app_installation_token
@@ -47,6 +50,71 @@ def _publish_event(event_type: str, data: dict) -> None:
             )
     except Exception:
         logger.debug("Failed to publish event %s (best-effort)", event_type)
+
+
+def _register_execution(instance_id: str, issue_context: dict) -> str | None:
+    """Register a workflow execution in workflow-builder's DB.
+
+    Returns the execution ID if successful, None otherwise.
+    Best-effort — failures don't block the workflow.
+    """
+    if not WORKFLOW_BUILDER_INTERNAL_TOKEN or not WORKFLOW_BUILDER_WORKFLOW_ID:
+        return None
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{WORKFLOW_BUILDER_BASE_URL}/api/internal/agent/workflows/execute",
+                headers={
+                    "X-Internal-Token": WORKFLOW_BUILDER_INTERNAL_TOKEN,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "workflowId": WORKFLOW_BUILDER_WORKFLOW_ID,
+                    "triggerData": {
+                        "source": "dapr-swe",
+                        "issue": f"{issue_context.get('owner')}/{issue_context.get('repo')}#{issue_context.get('issue_number')}",
+                        "title": issue_context.get("title", ""),
+                        "daprInstanceId": instance_id,
+                    },
+                },
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                execution_id = data.get("executionId", "")
+                logger.info("Registered execution %s in workflow-builder", execution_id)
+                return execution_id
+    except Exception:
+        logger.debug("Failed to register execution in workflow-builder (best-effort)")
+    return None
+
+
+def _post_agent_event(execution_id: str, event_type: str, data: dict) -> None:
+    """Post an agent event to workflow-builder for execution tracking.
+
+    Best-effort — failures don't block the workflow.
+    """
+    if not execution_id or not WORKFLOW_BUILDER_INTERNAL_TOKEN:
+        return
+    try:
+        with httpx.Client(timeout=5) as client:
+            client.post(
+                f"{WORKFLOW_BUILDER_BASE_URL}/api/internal/agent-events",
+                headers={
+                    "X-Internal-Token": WORKFLOW_BUILDER_INTERNAL_TOKEN,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "workflowExecutionId": execution_id,
+                    "events": [{
+                        "event_type": event_type,
+                        "phase": data.get("phase", ""),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        **{k: v for k, v in data.items() if k != "phase"},
+                    }],
+                },
+            )
+    except Exception:
+        logger.debug("Failed to post agent event %s (best-effort)", event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +183,17 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
         "sandbox_id": sandbox_id,
     })
 
+    # Register execution in workflow-builder DB (Phase 2 integration)
+    instance_id = f"resolve-{owner}-{repo}-{input.get('issue_number')}"
+    wb_execution_id = _register_execution(instance_id, input)
+
     return {
         **input,
         "sandbox_id": sandbox_id,
         "working_dir": working_dir,
         "agents_md": agents_md,
         "github_token": token,
+        "wb_execution_id": wb_execution_id or "",
     }
 
 
@@ -141,6 +214,11 @@ def create_plan(ctx: WorkflowActivityContext, input: dict) -> dict:
         "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
         "summary": plan.get("summary", ""),
         "steps": len(plan.get("steps", [])),
+    })
+    _post_agent_event(input.get("wb_execution_id", ""), "plan_created", {
+        "phase": "planning",
+        "summary": plan.get("summary", ""),
+        "stepCount": len(plan.get("steps", [])),
     })
 
     return plan
@@ -182,6 +260,11 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
         "step_index": step_index,
         "step_title": step.get("title", ""),
         "status": result.get("status", "unknown"),
+    })
+    _post_agent_event(input.get("wb_execution_id", ""), "step_completed", {
+        "phase": "implementing",
+        "stepIndex": step_index,
+        "stepTitle": step.get("title", ""),
     })
 
     return result

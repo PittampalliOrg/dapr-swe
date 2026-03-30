@@ -33,3 +33,11 @@ DAPR_STATE_STORE: str = os.environ.get("DAPR_STATE_STORE", "dapr-swe-statestore"
 DAPR_PUBSUB: str = os.environ.get("DAPR_PUBSUB", "pubsub")
 WORKFLOW_EVENT_TOPIC: str = os.environ.get("WORKFLOW_EVENT_TOPIC", "workflow.stream")
 ENABLE_WORKFLOW_EVENTS: bool = os.environ.get("ENABLE_WORKFLOW_EVENTS", "true").lower() == "true"
+
+# Workflow-builder integration (Phase 2: DB registration)
+WORKFLOW_BUILDER_BASE_URL: str = os.environ.get(
+    "WORKFLOW_BUILDER_BASE_URL",
+    "http://workflow-builder.workflow-builder.svc.cluster.local:3000",
+)
+WORKFLOW_BUILDER_INTERNAL_TOKEN: str = os.environ.get("WORKFLOW_BUILDER_INTERNAL_TOKEN", "")
+WORKFLOW_BUILDER_WORKFLOW_ID: str = os.environ.get("WORKFLOW_BUILDER_WORKFLOW_ID", "")
