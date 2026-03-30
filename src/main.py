@@ -111,7 +111,11 @@ async def execute_action(request: Request) -> dict:
         return {"success": False, "error": f"Unknown action: {function_slug}", "data": {}}
 
     try:
-        result = handler(input_data, node_outputs)
+        import asyncio
+
+        # Run handler in thread to avoid blocking uvicorn's event loop
+        # (handlers use sync httpx and may call asyncio.run internally)
+        result = await asyncio.to_thread(handler, input_data, node_outputs)
         return result
     except Exception as e:
         logger.exception("Action handler %s failed", function_slug)

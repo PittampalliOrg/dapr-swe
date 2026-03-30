@@ -84,12 +84,14 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     if not owner or not repo:
         return {"success": False, "data": {}, "error": "Missing required fields: owner, repo"}
 
-    # Get GitHub App installation token (async call in sync context)
-    loop = asyncio.new_event_loop()
-    try:
-        token = loop.run_until_complete(get_github_app_installation_token())
-    finally:
-        loop.close()
+    # Get GitHub App installation token
+    # Use thread executor to avoid event loop conflicts with uvicorn
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        token = pool.submit(
+            lambda: asyncio.run(get_github_app_installation_token())
+        ).result(timeout=30)
 
     if not token:
         return {"success": False, "data": {}, "error": "Failed to obtain GitHub App installation token"}
