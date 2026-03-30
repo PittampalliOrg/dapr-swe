@@ -226,11 +226,7 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
 
     sandbox = _reconnect_sandbox(sandbox_id)
 
-    step = _resolve(input_data, node_outputs, "step")
-    if not step:
-        return {"success": False, "data": {}, "error": "Missing required field: step"}
-
-    # Build issue context
+    # Build issue context from all available sources
     issue_context = {}
     for key in ("owner", "repo", "issue_number", "title", "body", "comments",
                 "sender", "working_dir", "agents_md", "github_token"):
@@ -239,6 +235,34 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
             issue_context[key] = val
 
     plan = _resolve(input_data, node_outputs, "plan") or {}
+
+    # Get step(s) to implement
+    step = _resolve(input_data, node_outputs, "step")
+    steps = plan.get("steps", [])
+
+    # If no specific step, implement all steps from the plan
+    if not step and steps:
+        results = []
+        for i, s in enumerate(steps):
+            logger.info("Implementing step %d/%d: %s", i + 1, len(steps), s.get("title", ""))
+            try:
+                r = run_developer(sandbox=sandbox, step=s, issue_context=issue_context, plan=plan)
+                results.append(r)
+            except Exception as exc:
+                logger.warning("Step %d failed: %s", i + 1, exc)
+                results.append({"status": "error", "error": str(exc)})
+        return {
+            "success": True,
+            "data": {"status": "completed", "steps_completed": len(results), "results": results},
+        }
+
+    if not step:
+        # No step and no plan steps — implement based on issue description
+        step = {
+            "title": "Implement changes",
+            "description": issue_context.get("body", issue_context.get("title", "")),
+            "files": [],
+        }
 
     try:
         result = run_developer(
