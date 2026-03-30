@@ -3,15 +3,50 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import httpx
 from dapr.ext.workflow import WorkflowActivityContext
 
-from src.config import GITHUB_WEBHOOK_SECRET
+from src.config import (
+    DAPR_PUBSUB,
+    ENABLE_WORKFLOW_EVENTS,
+    GITHUB_WEBHOOK_SECRET,
+    WORKFLOW_EVENT_TOPIC,
+)
 from src.integrations.github_app import get_github_app_installation_token
 from src.sandbox.openshell import OpenShellBackend, create_openshell_sandbox
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Event publishing (workflow-builder integration)
+# ---------------------------------------------------------------------------
+
+
+def _publish_event(event_type: str, data: dict) -> None:
+    """Publish a workflow event to the shared NATS JetStream topic.
+
+    Best-effort — failures are logged but never block the workflow.
+    """
+    if not ENABLE_WORKFLOW_EVENTS:
+        return
+    payload = {
+        "type": event_type,
+        "source": "dapr-swe",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "datacontenttype": "application/json",
+        "data": data,
+    }
+    try:
+        with httpx.Client(timeout=5) as client:
+            client.post(
+                f"http://localhost:3500/v1.0/publish/{DAPR_PUBSUB}/{WORKFLOW_EVENT_TOPIC}",
+                json=payload,
+            )
+    except Exception:
+        logger.debug("Failed to publish event %s (best-effort)", event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +109,12 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
     if agents_result.exit_code == 0 and agents_result.output.strip():
         agents_md = agents_result.output.strip()
 
+    _publish_event("dapr-swe.workflow.started", {
+        "issue": f"{owner}/{repo}#{input.get('issue_number')}",
+        "title": input.get("title", ""),
+        "sandbox_id": sandbox_id,
+    })
+
     return {
         **input,
         "sandbox_id": sandbox_id,
@@ -95,6 +136,13 @@ def create_plan(ctx: WorkflowActivityContext, input: dict) -> dict:
     sandbox = _reconnect_sandbox(input["sandbox_id"])
     plan = run_planner(sandbox, input)
     logger.info("Plan created: %s", plan.get("summary", ""))
+
+    _publish_event("dapr-swe.plan.created", {
+        "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
+        "summary": plan.get("summary", ""),
+        "steps": len(plan.get("steps", [])),
+    })
+
     return plan
 
 
@@ -114,6 +162,12 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     logger.info("Implementing step %d: %s", step_index, step.get("title", ""))
 
+    _publish_event("dapr-swe.step.started", {
+        "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
+        "step_index": step_index,
+        "step_title": step.get("title", ""),
+    })
+
     result = run_developer(
         sandbox=sandbox,
         step=step,
@@ -122,6 +176,14 @@ def implement_step(ctx: WorkflowActivityContext, input: dict) -> dict:
     )
 
     logger.info("Step %d result: %s", step_index, result.get("status", "unknown"))
+
+    _publish_event("dapr-swe.step.completed", {
+        "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
+        "step_index": step_index,
+        "step_title": step.get("title", ""),
+        "status": result.get("status", "unknown"),
+    })
+
     return result
 
 
@@ -159,6 +221,12 @@ def review_changes(ctx: WorkflowActivityContext, input: dict) -> dict:
     plan = input.get("plan", {})
     review = run_reviewer(diff=diff, issue_context=input, plan=plan)
     logger.info("Review: approved=%s", review.get("approved"))
+
+    _publish_event("dapr-swe.review.completed", {
+        "issue": f"{input.get('owner')}/{input.get('repo')}#{input.get('issue_number')}",
+        "approved": review.get("approved", False),
+    })
+
     return review
 
 
@@ -230,6 +298,10 @@ def commit_and_open_pr(ctx: WorkflowActivityContext, input: dict) -> dict:
     if resp.status_code == 201:
         pr_url = resp.json().get("html_url", "")
         logger.info("PR created: %s", pr_url)
+        _publish_event("dapr-swe.pr.created", {
+            "issue": f"{owner}/{repo}#{issue_number}",
+            "pr_url": pr_url,
+        })
         return {"status": "success", "pr_url": pr_url}
     elif resp.status_code == 422:
         # PR may already exist
@@ -282,6 +354,12 @@ def notify_completion(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     if resp.status_code not in (200, 201):
         logger.error("Failed to post issue comment: %s %s", resp.status_code, resp.text)
+
+    _publish_event("dapr-swe.workflow.completed", {
+        "issue": f"{owner}/{repo}#{issue_number}",
+        "status": status or "completed",
+        "pr_url": pr_url,
+    })
 
     return {"notified": True}
 

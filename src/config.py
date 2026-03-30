@@ -31,3 +31,5 @@ DEFAULT_REPO_OWNER: str = os.environ.get("DEFAULT_REPO_OWNER", "PittampalliOrg")
 # Dapr component names
 DAPR_STATE_STORE: str = os.environ.get("DAPR_STATE_STORE", "dapr-swe-statestore")
 DAPR_PUBSUB: str = os.environ.get("DAPR_PUBSUB", "pubsub")
+WORKFLOW_EVENT_TOPIC: str = os.environ.get("WORKFLOW_EVENT_TOPIC", "workflow.stream")
+ENABLE_WORKFLOW_EVENTS: bool = os.environ.get("ENABLE_WORKFLOW_EVENTS", "true").lower() == "true"
