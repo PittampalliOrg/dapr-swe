@@ -6,8 +6,9 @@ import logging
 from contextlib import asynccontextmanager
 
 from dapr.ext.workflow import WorkflowRuntime
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
+from src.actions import ACTION_HANDLERS
 from src.webhook.github import router as github_router
 from src.workflow.resolve_issue import (
     commit_and_open_pr,
@@ -95,3 +96,23 @@ async def readiness_check() -> dict:
     """Readiness check endpoint."""
     ready = _workflow_runtime is not None
     return {"status": "ready" if ready else "not_ready", "service": "dapr-swe"}
+
+
+@app.post("/execute")
+async def execute_action(request: Request) -> dict:
+    """Handle action requests from workflow-builder function-router."""
+    body = await request.json()
+    function_slug = body.get("function_slug", "")
+    input_data = body.get("input", {})
+    node_outputs = body.get("node_outputs", {})
+
+    handler = ACTION_HANDLERS.get(function_slug)
+    if not handler:
+        return {"success": False, "error": f"Unknown action: {function_slug}", "data": {}}
+
+    try:
+        result = handler(input_data, node_outputs)
+        return result
+    except Exception as e:
+        logger.exception("Action handler %s failed", function_slug)
+        return {"success": False, "error": str(e), "data": {}}
