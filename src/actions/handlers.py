@@ -413,7 +413,7 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
             return {"success": False, "data": {}, "error": f"Missing required field: {field}"}
 
     sandbox = _reconnect_sandbox(sandbox_id)
-    branch_name = f"dapr-swe/issue-{issue_number}"
+    import time; branch_name = f"dapr-swe/issue-{issue_number}-{int(time.time())}"
 
     # Check for actual changes
     status_result = sandbox.execute(f"cd {working_dir} && git status --porcelain", timeout=10)

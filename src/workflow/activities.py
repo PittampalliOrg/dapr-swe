@@ -236,7 +236,7 @@ def commit_and_open_pr(ctx: WorkflowActivityContext, input: dict) -> dict:
     plan = input.get("plan", {})
     token = input["github_token"]
 
-    branch_name = f"dapr-swe/issue-{issue_number}"
+    import time; branch_name = f"dapr-swe/issue-{issue_number}-{int(time.time())}"
 
     # Check for actual changes
     status_result = sandbox.execute(f"cd {working_dir} && git status --porcelain", timeout=10)
