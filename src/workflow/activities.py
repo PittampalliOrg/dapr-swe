@@ -152,6 +152,10 @@ def review_changes(ctx: WorkflowActivityContext, input: dict) -> dict:
         )
         diff = diff_result.output or ""
 
+    if not diff.strip():
+        logger.info("No diff to review — skipping")
+        return {"approved": True, "feedback": "No changes to review", "suggestions": []}
+
     plan = input.get("plan", {})
     review = run_reviewer(diff=diff, issue_context=input, plan=plan)
     logger.info("Review: approved=%s", review.get("approved"))
@@ -176,12 +180,20 @@ def commit_and_open_pr(ctx: WorkflowActivityContext, input: dict) -> dict:
 
     branch_name = f"dapr-swe/issue-{issue_number}"
 
-    # Create branch, stage, commit
+    # Check for actual changes
+    status_result = sandbox.execute(f"cd {working_dir} && git status --porcelain", timeout=10)
+    if not status_result.output.strip():
+        logger.warning("No changes to commit")
+        return {"status": "no_changes", "pr_url": "", "error": "No changes were made"}
+
+    # Configure git user, create branch, stage, commit
     sandbox.execute(
         f"cd {working_dir} && "
+        "git config user.email 'dapr-swe[bot]@users.noreply.github.com' && "
+        "git config user.name 'dapr-swe[bot]' && "
         f"git checkout -b {branch_name} && "
         "git add -A && "
-        f'git commit -m "fix: {title} [closes #{issue_number}]" --allow-empty',
+        f'git commit -m "fix: {title} [closes #{issue_number}]"',
         timeout=60,
     )
 

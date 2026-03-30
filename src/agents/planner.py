@@ -302,8 +302,8 @@ def _format_issue_prompt(issue_context: dict) -> str:
     parts.append(f"Working directory: {issue_context.get('working_dir', '/sandbox')}")
     parts.append("")
     parts.append(
-        "Explore the codebase and produce an implementation plan as described "
-        "in your system prompt."
+        "Explore the codebase using the tools, then produce your implementation "
+        "plan as a JSON object. Remember: your final message must be ONLY valid JSON."
     )
     return "\n".join(parts)
 
@@ -326,13 +326,28 @@ def _parse_plan(text: str) -> dict:
         except json.JSONDecodeError:
             pass
 
-    logger.warning("Could not parse plan JSON, returning raw text as summary")
+    # Try to extract JSON from markdown code fences
+    import re
+
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning("Could not parse plan JSON, creating actionable fallback")
     return {
         "summary": text[:500],
         "steps": [
             {
-                "title": "Implement changes",
-                "description": text,
+                "title": "Implement the requested changes",
+                "description": (
+                    "Analyze the issue requirements and implement them. "
+                    "Read the relevant source files, make the necessary modifications, "
+                    "and verify the changes work correctly. "
+                    f"Context: {text[:1000]}"
+                ),
                 "files": [],
                 "complexity": "medium",
             }
