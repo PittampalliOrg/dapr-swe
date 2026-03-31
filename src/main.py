@@ -188,10 +188,19 @@ async def execute_action(request: Request) -> dict:
         from src.tracing import trace_activity
 
         # Run handler in thread with tracing span
+        # Include workflow correlation tags so the WB UI trace tab can find these spans.
+        # The orchestrator sends db_execution_id and workflow_id at the top level of the body,
+        # and execution_id (dapr instance ID) also at top level.
+        db_execution_id = body.get("db_execution_id") or ""
+        workflow_id = body.get("workflow_id") or ""
+        instance_id = body.get("execution_id") or ""
         def _run():
             with trace_activity(f"dapr-swe.execute.{function_slug}", {
                 "dapr_swe.action": function_slug,
                 "dapr_swe.repo": (input_data.get("owner", "") + "/" + input_data.get("repo", "")).strip("/"),
+                "workflow.db_execution_id": db_execution_id,
+                "workflow.id": workflow_id,
+                "workflow.instance_id": instance_id,
             }):
                 return handler(input_data, node_outputs)
 
