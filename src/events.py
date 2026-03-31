@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+import json
+
 import httpx
+from dapr.clients import DaprClient
 
 from src.config import (
     DAPR_PUBSUB,
@@ -34,10 +37,12 @@ def publish_event(event_type: str, data: dict) -> None:
         "data": data,
     }
     try:
-        with httpx.Client(timeout=5) as client:
-            client.post(
-                f"http://localhost:3500/v1.0/publish/{DAPR_PUBSUB}/{WORKFLOW_EVENT_TOPIC}",
-                json=payload,
+        with DaprClient() as client:
+            client.publish_event(
+                pubsub_name=DAPR_PUBSUB,
+                topic_name=WORKFLOW_EVENT_TOPIC,
+                data=json.dumps(payload),
+                data_content_type="application/json",
             )
     except Exception:
         logger.debug("Failed to publish event %s (best-effort)", event_type)

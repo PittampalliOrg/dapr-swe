@@ -25,7 +25,6 @@ def _init_otel() -> None:
     try:
         from opentelemetry import trace
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -40,8 +39,16 @@ def _init_otel() -> None:
         ))
         trace.set_tracer_provider(provider)
 
-        # Auto-instrument httpx (FastAPI will be instrumented after app creation)
-        HTTPXClientInstrumentor().instrument()
+        # Enable dapr-agents native instrumentation (LLM spans, tool spans,
+        # workflow context propagation, httpx/gRPC auto-instrumentation).
+        try:
+            from dapr_agents.observability import DaprAgentsInstrumentor
+            DaprAgentsInstrumentor().instrument(tracer_provider=provider)
+            logging.getLogger(__name__).info("DaprAgentsInstrumentor enabled")
+        except Exception as agent_exc:
+            logging.getLogger(__name__).warning("DaprAgentsInstrumentor failed: %s — falling back to httpx only", agent_exc)
+            from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+            HTTPXClientInstrumentor().instrument()
 
         _otel_ready = True
         logging.getLogger(__name__).info("OpenTelemetry tracing initialized → %s", endpoint)

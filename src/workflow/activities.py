@@ -46,19 +46,26 @@ def initialize_context(ctx: WorkflowActivityContext, input: dict) -> dict:
     if not token:
         raise RuntimeError("Failed to obtain GitHub App installation token")
 
-    # Create sandbox
-    sandbox = create_openshell_sandbox()
-    sandbox_id = sandbox.id
+    # Derive deterministic sandbox ID from context
+    issue_num = input.get("issue_number", "latest")
+    sandbox_id = f"dapr-swe-{owner}-{repo}-{issue_num}"
+
+    # Create sandbox (reconnects if sandbox_id already exists)
+    sandbox = create_openshell_sandbox(sandbox_id=sandbox_id)
     working_dir = f"/sandbox/{repo}"
 
-    # Clone repository
-    clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
-    result = sandbox.execute(
-        f"git clone --depth=50 {clone_url} {working_dir}",
-        timeout=120,
-    )
-    if result.exit_code != 0:
-        raise RuntimeError(f"Failed to clone repository: {result.output}")
+    # Clone repository (skip if already cloned — idempotent for activity replay)
+    check = sandbox.execute(f"test -d {working_dir}/.git && echo exists", timeout=10)
+    if "exists" in (check.output or ""):
+        logger.info("Repo already cloned at %s, skipping clone", working_dir)
+    else:
+        clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+        result = sandbox.execute(
+            f"git clone --depth=50 {clone_url} {working_dir}",
+            timeout=120,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"Failed to clone repository: {result.output}")
 
     # Store credentials for later push
     sandbox.execute(

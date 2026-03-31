@@ -206,23 +206,40 @@ async def _start_workflow(issue_context: IssueContext) -> dict[str, Any]:
         from src.workflow.resolve_issue import resolve_issue_workflow
 
         wf_client = DaprWorkflowClient()
-        wf_client.schedule_new_workflow(
-            workflow=resolve_issue_workflow,
-            input=issue_context.model_dump(),
-            instance_id=instance_id,
-        )
-        logger.info(
-            "Started workflow %s for %s/%s#%d",
-            instance_id,
-            issue_context.owner,
-            issue_context.repo,
-            issue_context.issue_number,
-        )
-        return {
-            "status": "started",
-            "instance_id": instance_id,
-            "issue": f"{issue_context.owner}/{issue_context.repo}#{issue_context.issue_number}",
-        }
+        try:
+            wf_client.schedule_new_workflow(
+                workflow=resolve_issue_workflow,
+                input=issue_context.model_dump(),
+                instance_id=instance_id,
+            )
+            logger.info(
+                "Started workflow %s for %s/%s#%d",
+                instance_id,
+                issue_context.owner,
+                issue_context.repo,
+                issue_context.issue_number,
+            )
+            return {
+                "status": "started",
+                "instance_id": instance_id,
+                "issue": f"{issue_context.owner}/{issue_context.repo}#{issue_context.issue_number}",
+            }
+        except Exception:
+            # Check if the workflow instance already exists
+            existing = wf_client.get_workflow_state(
+                instance_id=instance_id, fetch_payloads=False
+            )
+            if existing is None:
+                raise
+            # Instance already exists, just log and continue
+            logger.info("Workflow instance %s already exists, skipping", instance_id)
+            return {
+                "status": "already_running",
+                "instance_id": instance_id,
+                "issue": f"{issue_context.owner}/{issue_context.repo}#{issue_context.issue_number}",
+            }
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to start workflow %s", instance_id)
         raise HTTPException(status_code=500, detail="Failed to start workflow")

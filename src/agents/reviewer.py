@@ -38,7 +38,7 @@ def create_reviewer_agent(**kwargs: Any) -> DurableAgent:
 
 
 # ---------------------------------------------------------------------------
-# Standalone runner (for activity context)
+# Standalone runner using DurableAgent
 # ---------------------------------------------------------------------------
 
 
@@ -49,49 +49,34 @@ def run_reviewer(
     *,
     model_override: str | None = None,
 ) -> dict:
-    """Run the reviewer and return the parsed review.
+    """Run the reviewer via DurableAgent and return the parsed review.
 
     Returns a dict with keys: approved, feedback, suggestions.
-
-    Parameters
-    ----------
-    model_override : str | None
-        LLM model to use instead of the configured ``LLM_MODEL_ID``.
     """
-    import httpx
+    from src.config import LLM_MODEL_ID
+    from src.llm_providers import resolve_llm_client
 
-    from src.config import ANTHROPIC_API_KEY, LLM_MODEL_ID
-
-    model = (model_override.removeprefix("anthropic/") if model_override else
-             LLM_MODEL_ID.removeprefix("anthropic/"))
-    user_prompt = _format_review_prompt(diff, issue_context, plan)
-
-    payload: dict[str, Any] = {
-        "model": model,
-        "max_tokens": 8192,
-        "system": REVIEWER_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }
-
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json=payload,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-    content_blocks = data.get("content", [])
-    text = "".join(
-        b.get("text", "") for b in content_blocks if b.get("type") == "text"
+    model = (
+        model_override.removeprefix("anthropic/")
+        if model_override
+        else LLM_MODEL_ID.removeprefix("anthropic/")
     )
 
-    return _parse_review(text)
+    import asyncio
+    from dapr_agents import Agent
+
+    agent = Agent(
+        name="ReviewerAgent",
+        role="Code Reviewer",
+        goal="Review code changes for correctness, style, and completeness",
+        system_prompt=REVIEWER_SYSTEM_PROMPT,
+        llm=resolve_llm_client(model),
+        tools=[],
+        execution=AgentExecutionConfig(max_iterations=1),
+    )
+
+    result = asyncio.run(agent.run(_format_review_prompt(diff, issue_context, plan)))
+    return _parse_review(result.content if result else "")
 
 
 # ---------------------------------------------------------------------------

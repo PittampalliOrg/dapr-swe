@@ -1,61 +1,27 @@
 """dapr-swe agent tools.
 
-Re-exports all tool instances and convenience lists for easy consumption::
+Each module exposes a factory function that returns ``@tool``-decorated
+callables bound to the provided context (sandbox, issue_context, etc.)::
 
-    from src.tools import sandbox_tools, git_tools, github_tools, web_tools
-    from src.tools.sandbox import set_sandbox
+    from src.tools.sandbox import make_sandbox_tools
+    from src.tools.github import make_github_tools
+    from src.tools.web import make_web_tools
+    from src.tools.linear import make_linear_tools
+    from src.tools.slack import make_slack_tools
 """
 
-from src.tools.sandbox import (
-    execute,
-    glob_files,
-    grep_files,
-    read_file,
-    sandbox_tools,
-    set_sandbox,
-    write_file,
-)
-from src.tools.git import (
-    git_checkout_branch,
-    git_clone,
-    git_commit,
-    git_diff,
-    git_push,
-    git_tools,
-)
-from src.tools.github import (
-    create_pull_request,
-    github_comment,
-    github_tools,
-)
-from src.tools.web import (
-    fetch_url,
-    http_request,
-    web_tools,
-)
+from src.tools.sandbox import make_sandbox_tools, make_readonly_sandbox_tools, make_test_tools
+from src.tools.github import make_github_tools
+from src.tools.web import make_web_tools
+from src.tools.linear import make_linear_tools
+from src.tools.slack import make_slack_tools
 
 __all__ = [
-    # sandbox
-    "set_sandbox",
-    "execute",
-    "read_file",
-    "write_file",
-    "glob_files",
-    "grep_files",
-    "sandbox_tools",
-    # git
-    "git_clone",
-    "git_commit",
-    "git_push",
-    "git_checkout_branch",
-    "git_diff",
-    "git_tools",
-    # github
-    "github_comment",
-    "create_pull_request",
-    "github_tools",
-    # web
-    "fetch_url",
-    "http_request",
-    "web_tools",
+    "make_sandbox_tools",
+    "make_readonly_sandbox_tools",
+    "make_test_tools",
+    "make_github_tools",
+    "make_web_tools",
+    "make_linear_tools",
+    "make_slack_tools",
 ]

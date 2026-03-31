@@ -119,27 +119,36 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     if not token:
         return {"success": False, "data": {}, "error": "No GitHub token available"}
 
-    # Create sandbox
+    # Derive deterministic sandbox ID from context
+    issue_num = _resolve(input_data, node_outputs, "issue_number") or "latest"
+    sandbox_id = f"dapr-swe-{owner}-{repo}-{issue_num}"
+
+    # Create sandbox (reconnects if sandbox_id already exists)
     try:
-        sandbox = create_openshell_sandbox()
+        sandbox = create_openshell_sandbox(sandbox_id=sandbox_id)
     except Exception as exc:
         return {"success": False, "data": {}, "error": f"Failed to create sandbox: {exc}"}
 
     sandbox_id = sandbox.id
     working_dir = f"/sandbox/{repo}"
 
-    # Clone repository
-    clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
-    result = sandbox.execute(
-        f"git clone --depth=50 {clone_url} {working_dir}",
-        timeout=120,
-    )
-    if result.exit_code != 0:
-        return {
-            "success": False,
-            "data": {"sandbox_id": sandbox_id},
-            "error": f"CLONE FAIL owner={owner} repo={repo} input_owner={input_data.get("owner")} input_repo={input_data.get("repo")} keys={list(input_data.keys())[:10]}: {result.output[:100]}",
-        }
+    # Clone repository (skip if already cloned — idempotent for activity replay)
+    check = sandbox.execute(f"test -d {working_dir}/.git && echo exists", timeout=10)
+    if "exists" in (check.output or ""):
+        logger.info("Repo already cloned at %s, skipping clone", working_dir)
+    else:
+        clone_url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+        clone_depth = _resolve(input_data, node_outputs, "cloneDepth") or "50"
+        result = sandbox.execute(
+            f"git clone --depth={clone_depth} {clone_url} {working_dir}",
+            timeout=120,
+        )
+        if result.exit_code != 0:
+            return {
+                "success": False,
+                "data": {"sandbox_id": sandbox_id},
+                "error": f"CLONE FAIL: {result.output[:200]}",
+            }
 
     # Store credentials for later push
     sandbox.execute(
@@ -161,12 +170,14 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     if agents_result.exit_code == 0 and agents_result.output.strip():
         agents_md = agents_result.output.strip()
 
-    # Publish workflow events and register execution
+    # Publish workflow started event (best-effort, non-blocking).
+    # NOTE: Do NOT call register_execution() here — this handler is called
+    # by the orchestrator via function-router. The BFF webhook already created
+    # the execution record. Calling register_execution() would hit the BFF's
+    # /api/internal/agent/workflows/execute which starts a NEW orchestrator
+    # workflow, creating an infinite cascade loop.
     issue_ref = f"{owner}/{repo}#{input_data.get('issue_number', '')}"
     publish_event("dapr-swe.workflow.started", {"issue": issue_ref, "title": input_data.get("title", ""), "sandbox_id": sandbox_id})
-    instance_id = f"resolve-{owner}-{repo}-{input_data.get('issue_number', '')}"
-    wb_execution_id = register_execution(instance_id, input_data)
-    update_execution_status(wb_execution_id, "initializing", 10)
 
     return {
         "success": True,
@@ -175,7 +186,7 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
             "working_dir": working_dir,
             "agents_md": agents_md,
             "github_token": token,
-            "wb_execution_id": wb_execution_id or "",
+            "wb_execution_id": "",
         },
         "error": None,
     }
@@ -546,11 +557,145 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 6. Solve -- single DurableAgent that does everything end-to-end
+# ---------------------------------------------------------------------------
+
+
+def handle_solve(input_data: dict, node_outputs: dict) -> dict:
+    """Run the full CodingAgent: explore → plan → implement → test → commit → PR.
+
+    Expects sandbox_id, working_dir, owner, repo, issue_number, github_token
+    from the initialize step's output (via node_outputs).
+    """
+    sandbox_id = _resolve(input_data, node_outputs, "sandbox_id")
+    working_dir = _resolve(input_data, node_outputs, "working_dir")
+    owner = _resolve(input_data, node_outputs, "owner")
+    repo = _resolve(input_data, node_outputs, "repo")
+    issue_number = _resolve(input_data, node_outputs, "issue_number")
+    token = _resolve(input_data, node_outputs, "github_token")
+    agents_md = _resolve(input_data, node_outputs, "agents_md") or ""
+    title = _resolve(input_data, node_outputs, "title") or "Untitled issue"
+    body = _resolve(input_data, node_outputs, "body") or ""
+    comments = _resolve(input_data, node_outputs, "comments") or []
+
+    for field, val in [("sandbox_id", sandbox_id), ("working_dir", working_dir),
+                       ("owner", owner), ("repo", repo)]:
+        if not val:
+            return {"success": False, "data": {}, "error": f"Missing required field: {field}"}
+
+    # Resolve model from config (workflow-builder UI passes this)
+    model = _resolve(input_data, node_outputs, "model") or os.environ.get("LLM_MODEL_ID", "claude-opus-4-6")
+    max_iterations = int(_resolve(input_data, node_outputs, "maxIterations") or 1000)
+
+    # Reconnect to existing sandbox
+    sandbox = _reconnect_sandbox(sandbox_id)
+
+    # Build issue context
+    issue_context = {
+        "owner": owner,
+        "repo": repo,
+        "issue_number": issue_number,
+        "title": title,
+        "body": body,
+        "comments": comments,
+        "github_token": token,
+        "working_dir": working_dir,
+        "agents_md": agents_md,
+    }
+
+    try:
+        from dapr_agents import DurableAgent
+        from dapr_agents.agents.configs import AgentExecutionConfig, WorkflowRetryPolicy
+        from dapr_agents.workflow.runners import AgentRunner
+        from src.llm_providers import resolve_llm_client
+        from src.prompts.coding_agent import construct_system_prompt
+        from src.tools.sandbox import make_sandbox_tools
+        from src.tools.github import make_github_tools
+        from src.tools.web import make_web_tools
+        from src.tools.linear import make_linear_tools
+        from src.tools.slack import make_slack_tools
+
+        # Build all tools bound to this sandbox + context
+        all_tools = (
+            make_sandbox_tools(sandbox)
+            + make_github_tools(sandbox, issue_context)
+            + make_web_tools()
+            + make_linear_tools(issue_context)
+            + make_slack_tools(issue_context)
+        )
+
+        # Get the shared workflow runtime from main.py
+        from src.main import _workflow_runtime
+
+        # Create DurableAgent with shared runtime
+        agent = DurableAgent(
+            name="CodingAgent",
+            role="Senior Software Engineer",
+            goal="Resolve the assigned issue by implementing changes and opening a PR",
+            system_prompt=construct_system_prompt(working_dir, issue_context),
+            llm=resolve_llm_client(model),
+            tools=all_tools,
+            execution=AgentExecutionConfig(
+                max_iterations=max_iterations,
+            ),
+            retry_policy=WorkflowRetryPolicy(
+                max_attempts=3,
+                initial_backoff_seconds=10,
+                max_backoff_seconds=60,
+                backoff_multiplier=2.0,
+            ),
+            runtime=_workflow_runtime,
+        )
+
+        # Run via AgentRunner (async — use asyncio.run in the thread)
+        async def _run_agent():
+            runner = AgentRunner(name="solve-runner", timeout_in_seconds=1800)
+            try:
+                result = await runner.run(agent, payload={"task": _format_solve_task(issue_context)}, wait=True)
+                return result
+            finally:
+                runner.shutdown(agent)
+
+        result = asyncio.run(_run_agent())
+
+        return {
+            "success": True,
+            "data": {"result": str(result) if result else "Agent completed"},
+            "error": None,
+        }
+
+    except Exception as exc:
+        logger.exception("CodingAgent failed")
+        return {"success": False, "data": {}, "error": f"CodingAgent failed: {exc}"}
+
+
+def _format_solve_task(issue_context: dict) -> str:
+    """Format the issue into the initial task prompt for the CodingAgent."""
+    parts = [f"## Issue: {issue_context.get('title', 'Untitled')}"]
+    parts.append("")
+    parts.append(issue_context.get("body", "No description provided."))
+    comments = issue_context.get("comments", [])
+    if comments:
+        parts.append("\n## Comments")
+        for c in comments:
+            user = c.get("user", "unknown")
+            parts.append(f"<untrusted-content user=\"{user}\">")
+            parts.append(c.get("body", ""))
+            parts.append("</untrusted-content>")
+    parts.append(f"\nRepository: {issue_context.get('owner', '')}/{issue_context.get('repo', '')}")
+    parts.append(f"Issue: #{issue_context.get('issue_number', '')}")
+    parts.append(f"Working directory: {issue_context.get('working_dir', '/sandbox')}")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Action handler registry
 # ---------------------------------------------------------------------------
 
 ACTION_HANDLERS: dict[str, Any] = {
     "dapr-swe/initialize": handle_initialize,
+    "dapr-swe/solve": handle_solve,
+    # Legacy handlers route to solve for backwards compat
     "dapr-swe/plan": handle_plan,
     "dapr-swe/develop": handle_develop,
     "dapr-swe/review": handle_review,
