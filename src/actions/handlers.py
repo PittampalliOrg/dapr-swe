@@ -96,8 +96,21 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     Expects owner and repo in input_data (or from a trigger node output).
     Returns sandbox_id, working_dir, agents_md, github_token.
     """
+    import json as _json
+    import sys; sys.stderr.write(f"HANDLER DEBUG input_data keys: {list(input_data.keys())}")
+    import sys; sys.stderr.write(f"HANDLER DEBUG input_data owner={input_data.get('owner')} repo={input_data.get('repo')}")
+    import sys; sys.stderr.write(f"HANDLER DEBUG node_outputs keys: {list(node_outputs.keys())}")
+    for k, v in node_outputs.items():
+        if isinstance(v, dict):
+            d = v.get('data', v)
+            if isinstance(d, dict) and ('repo' in d or 'owner' in d):
+                import sys; sys.stderr.write(f"HANDLER DEBUG node_output[{k}] has owner={d.get('owner')} repo={d.get('repo')}")
+            inner = d.get('data', {}) if isinstance(d, dict) else {}
+            if isinstance(inner, dict) and ('repo' in inner or 'owner' in inner):
+                import sys; sys.stderr.write(f"HANDLER DEBUG node_output[{k}].data has owner={inner.get('owner')} repo={inner.get('repo')}")
     owner = _resolve(input_data, node_outputs, "owner")
     repo = _resolve(input_data, node_outputs, "repo")
+    import sys; sys.stderr.write(f"HANDLER DEBUG resolved owner={owner} repo={repo}\n")
 
     if not owner or not repo:
         return {"success": False, "data": {}, "error": "Missing required fields: owner, repo"}
@@ -138,7 +151,7 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
         return {
             "success": False,
             "data": {"sandbox_id": sandbox_id},
-            "error": f"Failed to clone repository: {result.output}",
+            "error": f"Failed to clone repository (resolved owner={owner}, repo={repo}): {result.output}",
         }
 
     # Store credentials for later push
@@ -430,8 +443,21 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
     """
     sandbox_id = _resolve(input_data, node_outputs, "sandbox_id")
     working_dir = _resolve(input_data, node_outputs, "working_dir")
+    import json as _json
+    import sys; sys.stderr.write(f"HANDLER DEBUG input_data keys: {list(input_data.keys())}")
+    import sys; sys.stderr.write(f"HANDLER DEBUG input_data owner={input_data.get('owner')} repo={input_data.get('repo')}")
+    import sys; sys.stderr.write(f"HANDLER DEBUG node_outputs keys: {list(node_outputs.keys())}")
+    for k, v in node_outputs.items():
+        if isinstance(v, dict):
+            d = v.get('data', v)
+            if isinstance(d, dict) and ('repo' in d or 'owner' in d):
+                import sys; sys.stderr.write(f"HANDLER DEBUG node_output[{k}] has owner={d.get('owner')} repo={d.get('repo')}")
+            inner = d.get('data', {}) if isinstance(d, dict) else {}
+            if isinstance(inner, dict) and ('repo' in inner or 'owner' in inner):
+                import sys; sys.stderr.write(f"HANDLER DEBUG node_output[{k}].data has owner={inner.get('owner')} repo={inner.get('repo')}")
     owner = _resolve(input_data, node_outputs, "owner")
     repo = _resolve(input_data, node_outputs, "repo")
+    import sys; sys.stderr.write(f"HANDLER DEBUG resolved owner={owner} repo={repo}\n")
     issue_number = _resolve(input_data, node_outputs, "issue_number")
     token = _resolve(input_data, node_outputs, "github_token")
     title = _resolve(input_data, node_outputs, "title") or "Untitled issue"

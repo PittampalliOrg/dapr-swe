@@ -169,6 +169,8 @@ async def execute_action(request: Request) -> dict:
     input_data = body.get("input", body)  # Fall back to full body as input
     node_outputs = body.get("node_outputs", {})
 
+    logger.info("EXECUTE DEBUG slug=%s input_keys=%s node_output_keys=%s", function_slug, list(input_data.keys()), list(node_outputs.keys()))
+    logger.info("EXECUTE DEBUG owner=%s repo=%s", input_data.get("owner"), input_data.get("repo"))
     handler = ACTION_HANDLERS.get(function_slug)
     if not handler:
         return {"success": False, "error": f"Unknown action: {function_slug}", "data": {}}
