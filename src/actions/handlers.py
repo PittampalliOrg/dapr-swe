@@ -647,6 +647,13 @@ def handle_solve(input_data: dict, node_outputs: dict) -> dict:
             runtime=_workflow_runtime,
         )
 
+        # Pre-start agent (registers workflows on runtime). Catch if already registered
+        # from a previous call — the shared runtime persists across requests.
+        try:
+            agent.start()
+        except (ValueError, RuntimeError) as start_err:
+            logger.debug("Agent start (likely already registered): %s", start_err)
+
         # Run via AgentRunner (async — use asyncio.run in the thread)
         async def _run_agent():
             runner = AgentRunner(name="solve-runner", timeout_in_seconds=1800)
