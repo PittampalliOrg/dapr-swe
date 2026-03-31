@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -101,17 +102,22 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     if not owner or not repo:
         return {"success": False, "data": {}, "error": "Missing required fields: owner, repo"}
 
-    # Get GitHub App installation token
-    # Use thread executor to avoid event loop conflicts with uvicorn
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor() as pool:
-        token = pool.submit(
-            lambda: asyncio.run(get_github_app_installation_token())
-        ).result(timeout=30)
+    # Get GitHub token — prefer connection token from workflow-builder, fall back to App token
+    token = (
+        _resolve(input_data, node_outputs, "githubToken")
+        or _resolve(input_data, node_outputs, "github_token")
+        or _resolve(input_data, node_outputs, "repositoryToken")
+        or os.environ.get("GITHUB_TOKEN")
+    )
+    if not token:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            token = pool.submit(
+                lambda: asyncio.run(get_github_app_installation_token())
+            ).result(timeout=30)
 
     if not token:
-        return {"success": False, "data": {}, "error": "Failed to obtain GitHub App installation token"}
+        return {"success": False, "data": {}, "error": "No GitHub token available"}
 
     # Create sandbox
     try:
