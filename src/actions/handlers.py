@@ -96,13 +96,7 @@ def handle_initialize(input_data: dict, node_outputs: dict) -> dict:
     Expects owner and repo in input_data (or from a trigger node output).
     Returns sandbox_id, working_dir, agents_md, github_token.
     """
-    for k, v in node_outputs.items():
-        if isinstance(v, dict):
-            d = v.get('data', v)
-            if isinstance(d, dict) and ('repo' in d or 'owner' in d):
-                        inner = d.get('data', {}) if isinstance(d, dict) else {}
-            if isinstance(inner, dict) and ('repo' in inner or 'owner' in inner):
-                owner = _resolve(input_data, node_outputs, "owner")
+    owner = _resolve(input_data, node_outputs, "owner")
     repo = _resolve(input_data, node_outputs, "repo")
 
     if not owner or not repo:
@@ -436,13 +430,7 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
     """
     sandbox_id = _resolve(input_data, node_outputs, "sandbox_id")
     working_dir = _resolve(input_data, node_outputs, "working_dir")
-    for k, v in node_outputs.items():
-        if isinstance(v, dict):
-            d = v.get('data', v)
-            if isinstance(d, dict) and ('repo' in d or 'owner' in d):
-                        inner = d.get('data', {}) if isinstance(d, dict) else {}
-            if isinstance(inner, dict) and ('repo' in inner or 'owner' in inner):
-                owner = _resolve(input_data, node_outputs, "owner")
+    owner = _resolve(input_data, node_outputs, "owner")
     repo = _resolve(input_data, node_outputs, "repo")
     issue_number = _resolve(input_data, node_outputs, "issue_number")
     token = _resolve(input_data, node_outputs, "github_token")
