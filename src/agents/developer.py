@@ -111,10 +111,23 @@ def run_developer(
     step: dict,
     issue_context: dict,
     plan: dict,
+    *,
+    model_override: str | None = None,
+    max_iterations: int | None = None,
+    system_prompt_extra: str | None = None,
 ) -> dict:
     """Run the developer loop for a single plan step.
 
     Returns a dict with keys: status, summary, files_changed.
+
+    Parameters
+    ----------
+    model_override : str | None
+        LLM model to use instead of the configured ``LLM_MODEL_ID``.
+    max_iterations : int | None
+        Maximum agentic loop iterations (default 50).
+    system_prompt_extra : str | None
+        Extra text appended to the system prompt.
     """
     import httpx
 
@@ -126,6 +139,8 @@ def run_developer(
         working_dir=working_dir,
         agents_md=agents_md,
     )
+    if system_prompt_extra:
+        system_prompt = system_prompt + "\n\n" + system_prompt_extra
 
     tools_defs = _build_tool_specs()
     sandbox_tools = {t.__name__: t for t in _make_raw_tools(sandbox)}
@@ -136,9 +151,12 @@ def run_developer(
         },
     ]
 
-    model = LLM_MODEL_ID.removeprefix("anthropic/")
+    model = (model_override.removeprefix("anthropic/") if model_override else
+             LLM_MODEL_ID.removeprefix("anthropic/"))
 
-    for _ in range(50):
+    iteration_limit = max_iterations if max_iterations is not None else 50
+
+    for _ in range(iteration_limit):
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": 16384,

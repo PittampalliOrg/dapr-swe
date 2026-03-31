@@ -93,12 +93,28 @@ def create_planner_agent(
 # ---------------------------------------------------------------------------
 
 
-def run_planner(sandbox: OpenShellBackend, issue_context: dict) -> dict:
+def run_planner(
+    sandbox: OpenShellBackend,
+    issue_context: dict,
+    *,
+    model_override: str | None = None,
+    max_iterations: int | None = None,
+    system_prompt_extra: str | None = None,
+) -> dict:
     """Run the planner loop and return the parsed plan.
 
     This is a simplified runner for use inside a workflow activity where we
     do not need the full DurableAgent pub/sub lifecycle.  It calls the
     Anthropic API directly via httpx as a fallback.
+
+    Parameters
+    ----------
+    model_override : str | None
+        LLM model to use instead of the configured ``LLM_MODEL_ID``.
+    max_iterations : int | None
+        Maximum agentic loop iterations (default 30).
+    system_prompt_extra : str | None
+        Extra text appended to the system prompt.
     """
     import httpx
 
@@ -113,13 +129,20 @@ def run_planner(sandbox: OpenShellBackend, issue_context: dict) -> dict:
         },
     ]
 
-    model = LLM_MODEL_ID.removeprefix("anthropic/")
+    model = (model_override.removeprefix("anthropic/") if model_override else
+             LLM_MODEL_ID.removeprefix("anthropic/"))
 
-    for _ in range(30):
+    system_prompt = PLANNER_SYSTEM_PROMPT
+    if system_prompt_extra:
+        system_prompt = system_prompt + "\n\n" + system_prompt_extra
+
+    iteration_limit = max_iterations if max_iterations is not None else 30
+
+    for _ in range(iteration_limit):
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": 16384,
-            "system": PLANNER_SYSTEM_PROMPT,
+            "system": system_prompt,
             "messages": messages,
             "tools": tools_defs,
         }

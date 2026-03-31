@@ -46,16 +46,24 @@ def run_reviewer(
     diff: str,
     issue_context: dict,
     plan: dict,
+    *,
+    model_override: str | None = None,
 ) -> dict:
     """Run the reviewer and return the parsed review.
 
     Returns a dict with keys: approved, feedback, suggestions.
+
+    Parameters
+    ----------
+    model_override : str | None
+        LLM model to use instead of the configured ``LLM_MODEL_ID``.
     """
     import httpx
 
     from src.config import ANTHROPIC_API_KEY, LLM_MODEL_ID
 
-    model = LLM_MODEL_ID.removeprefix("anthropic/")
+    model = (model_override.removeprefix("anthropic/") if model_override else
+             LLM_MODEL_ID.removeprefix("anthropic/"))
     user_prompt = _format_review_prompt(diff, issue_context, plan)
 
     payload: dict[str, Any] = {

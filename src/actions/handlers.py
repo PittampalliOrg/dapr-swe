@@ -201,8 +201,18 @@ def handle_plan(input_data: dict, node_outputs: dict) -> dict:
         if val is not None:
             issue_context[key] = val
 
+    # Resolve optional configuration overrides from workflow-builder UI
+    model = _resolve(input_data, node_outputs, "model")
+    max_iters = _resolve(input_data, node_outputs, "maxIterations")
+    prompt_extra = _resolve(input_data, node_outputs, "systemPromptOverride")
+
     try:
-        plan = run_planner(sandbox, issue_context)
+        plan = run_planner(
+            sandbox, issue_context,
+            model_override=model,
+            max_iterations=int(max_iters) if max_iters else None,
+            system_prompt_extra=prompt_extra,
+        )
     except Exception as exc:
         logger.exception("PlannerAgent failed")
         return {"success": False, "data": {}, "error": f"PlannerAgent failed: {exc}"}
@@ -257,6 +267,16 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
     wb_exec_id = _resolve(input_data, node_outputs, "wb_execution_id") or ""
     issue_ref = f"{_resolve(input_data, node_outputs, 'owner')}/{_resolve(input_data, node_outputs, 'repo')}#{_resolve(input_data, node_outputs, 'issue_number')}"
 
+    # Resolve optional configuration overrides from workflow-builder UI
+    model = _resolve(input_data, node_outputs, "model")
+    max_iters = _resolve(input_data, node_outputs, "maxIterations")
+    prompt_extra = _resolve(input_data, node_outputs, "systemPromptOverride")
+    dev_overrides = dict(
+        model_override=model,
+        max_iterations=int(max_iters) if max_iters else None,
+        system_prompt_extra=prompt_extra,
+    )
+
     # Get step(s) to implement
     step = _resolve(input_data, node_outputs, "step")
     steps = plan.get("steps", [])
@@ -268,7 +288,7 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
             logger.info("Implementing step %d/%d: %s", i + 1, len(steps), s.get("title", ""))
             publish_event("dapr-swe.step.started", {"issue": issue_ref, "step_index": i, "step_title": s.get("title", "")})
             try:
-                r = run_developer(sandbox=sandbox, step=s, issue_context=issue_context, plan=plan)
+                r = run_developer(sandbox=sandbox, step=s, issue_context=issue_context, plan=plan, **dev_overrides)
                 results.append(r)
                 publish_event("dapr-swe.step.completed", {"issue": issue_ref, "step_index": i, "step_title": s.get("title", ""), "status": r.get("status", "")})
                 update_execution_status(wb_exec_id, "implementing", 40 + i * 10)
@@ -296,6 +316,7 @@ def handle_develop(input_data: dict, node_outputs: dict) -> dict:
             step=step,
             issue_context=issue_context,
             plan=plan,
+            **dev_overrides,
         )
     except Exception as exc:
         logger.exception("DeveloperAgent failed")
@@ -365,8 +386,11 @@ def handle_review(input_data: dict, node_outputs: dict) -> dict:
 
     plan = _resolve(input_data, node_outputs, "plan") or {}
 
+    # Resolve optional configuration overrides from workflow-builder UI
+    model = _resolve(input_data, node_outputs, "model")
+
     try:
-        review = run_reviewer(diff=diff, issue_context=issue_context, plan=plan)
+        review = run_reviewer(diff=diff, issue_context=issue_context, plan=plan, model_override=model)
     except Exception as exc:
         logger.exception("ReviewerAgent failed")
         return {"success": False, "data": {}, "error": f"ReviewerAgent failed: {exc}"}
@@ -413,6 +437,14 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
         if not val:
             return {"success": False, "data": {}, "error": f"Missing required field: {field}"}
 
+    # Resolve optional configuration overrides from workflow-builder UI
+    draft = _resolve(input_data, node_outputs, "draft")
+    base_branch = _resolve(input_data, node_outputs, "baseBranch") or "main"
+    pr_title = _resolve(input_data, node_outputs, "prTitle") or f"fix: {title} [closes #{issue_number}]"
+
+    # draft is True unless explicitly set to "false"
+    is_draft = True if draft is None else str(draft).lower() != "false"
+
     sandbox = _reconnect_sandbox(sandbox_id)
     import time; branch_name = f"dapr-swe/issue-{issue_number}-{int(time.time())}"
 
@@ -432,7 +464,7 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
         "git config user.name 'dapr-swe[bot]' && "
         f"git checkout -b {branch_name} && "
         "git add -A && "
-        f'git commit -m "fix: {title} [closes #{issue_number}]"',
+        f'git commit -m "{pr_title}"',
         timeout=60,
     )
     if commit_result.exit_code != 0:
@@ -457,11 +489,11 @@ def handle_commit_pr(input_data: dict, node_outputs: dict) -> dict:
     # Open PR via GitHub API
     pr_body = _build_pr_body(plan, int(issue_number))
     pr_data = {
-        "title": f"fix: {title} [closes #{issue_number}]",
+        "title": pr_title,
         "head": branch_name,
-        "base": "main",
+        "base": base_branch,
         "body": pr_body,
-        "draft": True,
+        "draft": is_draft,
     }
 
     try:
